@@ -1,0 +1,7 @@
+freegpu
+FreeGPU.app/
+dist/
+videos/
+*.ipynb
+*.bak
+.DS_Store

@@ -1,0 +1,1060 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>FreeGPU — Colab GPU Terminal</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 80 80'%3E%3Crect x='4' y='4' width='72' height='72' rx='16' fill='%230A0A0A' stroke='%233ECF8E' stroke-width='4'/%3E%3Crect x='19' y='19' width='42' height='42' rx='6' fill='%230F1411' stroke='%233ECF8E' stroke-width='3'/%3E%3Cpath d='M29 33L37 40L29 47' fill='none' stroke='%233ECF8E' stroke-width='4' stroke-linecap='square'/%3E%3Crect x='41' y='44' width='11' height='4' fill='%23EDEDED'/%3E%3C/svg%3E" />
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css" />
+<script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
+<style>
+/* Style 03 — Pixel Mono Retro-Tech (Default) + Style 10 — Retro Mac OS System 6 Theme Toggle */
+:root {
+  --bg: #0A0A0A;
+  --panel: #111311;
+  --text: #EDEDED;
+  --dim: #888888;
+  --green: #3ECF8E;
+  --green-ink: #0A0A0A;
+  --amber: #F59E0B;
+  --red: #EF4444;
+  --line: #222222;
+  --border-w: 1px;
+  --mono: "SF Mono", Menlo, Consolas, "Courier New", monospace;
+}
+
+body.sys6 {
+  --bg: #FFFFFF;
+  --panel: #F4F4F4;
+  --text: #000000;
+  --dim: #555555;
+  --green: #000000;
+  --green-ink: #FFFFFF;
+  --amber: #000000;
+  --red: #000000;
+  --line: #000000;
+  --border-w: 2px;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body {
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 12px;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+}
+
+.app-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  width: 100vw;
+}
+
+/* Title Bar */
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 38px;
+  padding: 0 14px;
+  border-bottom: var(--border-w) solid var(--line);
+  background: var(--panel);
+  -webkit-app-region: drag;
+}
+.topbar-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.brand-hl {
+  background: var(--green);
+  color: var(--green-ink);
+  padding: 2px 7px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.sys6-lines {
+  display: none;
+  flex: 1;
+  height: 10px;
+  margin: 0 12px;
+  background: repeating-linear-gradient(0deg, #000 0 1px, #fff 1px 3px);
+}
+body.sys6 .sys6-lines { display: block; }
+
+.topbar-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  -webkit-app-region: no-drag;
+}
+
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: var(--border-w) solid var(--line);
+  padding: 3px 9px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.status-badge.ready {
+  border-color: var(--green);
+  color: var(--green);
+}
+.status-badge.booting {
+  border-color: var(--amber);
+  color: var(--amber);
+}
+.dot {
+  width: 7px;
+  height: 7px;
+  background: var(--dim);
+}
+.dot.ready { background: var(--green); }
+.dot.booting { background: var(--amber); }
+
+/* Main Split Grid */
+.workspace {
+  display: grid;
+  grid-template-columns: 300px 1fr;
+  flex: 1;
+  min-height: 0;
+}
+body.focus-mode .workspace {
+  grid-template-columns: 1fr;
+}
+body.focus-mode .sidebar {
+  display: none;
+}
+
+/* Compact inline telemetry strip (shown in Focus Mode) */
+.focus-stats {
+  display: none;
+  align-items: center;
+  gap: 12px;
+  font-size: 11px;
+  color: var(--dim);
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+body.focus-mode .focus-stats {
+  display: inline-flex;
+}
+body.focus-mode .term-title {
+  display: none;
+}
+.fstat {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.fstat b {
+  color: var(--text);
+  font-weight: 700;
+}
+.fstat.hi b {
+  color: var(--green);
+}
+.fsep {
+  color: var(--line);
+}
+.btn-xs.btn-stop-mini {
+  border-color: var(--red);
+  color: var(--red);
+}
+.btn-xs.btn-stop-mini:hover {
+  background: var(--red);
+  color: #fff;
+}
+
+/* Left Sidebar: Stats & 1-Click GPU Control */
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  border-right: var(--border-w) solid var(--line);
+  background: var(--bg);
+  overflow-y: auto;
+}
+
+.block {
+  padding: 14px 16px;
+  border-bottom: var(--border-w) solid var(--line);
+}
+
+.block-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--dim);
+  margin-bottom: 10px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.field-label {
+  font-size: 10px;
+  color: var(--dim);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-bottom: 4px;
+  display: block;
+}
+
+select {
+  width: 100%;
+  background: var(--panel);
+  color: var(--text);
+  border: var(--border-w) solid var(--line);
+  padding: 7px 9px;
+  font-family: var(--mono);
+  font-size: 12px;
+  border-radius: 0;
+  margin-bottom: 10px;
+  cursor: pointer;
+  appearance: none;
+}
+select:focus {
+  outline: none;
+  border-color: var(--green);
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: var(--border-w) solid var(--line);
+  background: var(--panel);
+  color: var(--text);
+  padding: 8px 12px;
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  cursor: pointer;
+  text-decoration: none;
+}
+.btn:hover {
+  border-color: var(--green);
+  color: var(--green);
+}
+.btn-primary {
+  width: 100%;
+  background: var(--green);
+  color: var(--green-ink);
+  border-color: var(--green);
+  padding: 10px 14px;
+  font-size: 12px;
+}
+.btn-primary:hover {
+  opacity: 0.92;
+  color: var(--green-ink);
+}
+.btn-stop {
+  width: 100%;
+  background: transparent;
+  border-color: var(--red);
+  color: var(--red);
+  padding: 10px 14px;
+  font-size: 12px;
+}
+.btn-stop:hover {
+  background: var(--red);
+  color: #fff;
+  border-color: var(--red);
+}
+.btn-xs {
+  padding: 3px 8px;
+  font-size: 10px;
+}
+body.sys6 .btn {
+  box-shadow: 2px 2px 0 #000;
+}
+
+/* Telemetry Bars */
+.meter {
+  margin-bottom: 11px;
+}
+.meter:last-child { margin-bottom: 0; }
+.meter-head {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+  margin-bottom: 4px;
+}
+.meter-val {
+  color: var(--green);
+  font-weight: 700;
+}
+.bar-track {
+  width: 100%;
+  height: 7px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+}
+.bar-fill {
+  height: 100%;
+  background: var(--green);
+  width: 0%;
+  transition: width 0.25s ease;
+}
+
+.stat-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 10px;
+}
+.stat-box {
+  background: var(--panel);
+  border: var(--border-w) solid var(--line);
+  padding: 8px 10px;
+}
+.stat-box .n {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--green);
+}
+.stat-box .l {
+  font-size: 9.5px;
+  color: var(--dim);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-top: 2px;
+}
+
+.hours-row {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+  margin-top: 8px;
+}
+.hr-cell {
+  border: 1px solid var(--line);
+  background: var(--panel);
+  padding: 6px;
+  text-align: center;
+}
+.hr-cell .g { font-size: 9.5px; color: var(--dim); }
+.hr-cell .v { font-size: 13px; font-weight: 700; color: var(--text); margin-top: 2px; }
+
+.log-feed {
+  flex: 1;
+  padding: 12px 16px;
+  font-size: 10.5px;
+  color: var(--dim);
+  line-height: 1.55;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* Right Main Pane: Embedded PTY Terminal */
+.terminal-pane {
+  display: flex;
+  flex-direction: column;
+  background: #0A0A0A;
+  min-width: 0;
+  min-height: 0;
+}
+.term-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 34px;
+  padding: 0 14px;
+  border-bottom: var(--border-w) solid var(--line);
+  background: var(--panel);
+}
+.term-title {
+  font-size: 11px;
+  color: var(--dim);
+}
+.term-actions {
+  display: flex;
+  gap: 6px;
+}
+#terminalContainer {
+  flex: 1;
+  padding: 8px 10px;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+/* In-app Topbar Brand Icon */
+.brand-icon {
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+  display: block;
+}
+
+/* Animated Pixel-Mono Splash Screen */
+#splashScreen {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background:
+    radial-gradient(circle at 50% 45%, rgba(62, 207, 142, 0.14) 0%, rgba(10, 10, 10, 0) 48%),
+    linear-gradient(rgba(62, 207, 142, 0.035) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(62, 207, 142, 0.035) 1px, transparent 1px),
+    #0A0A0A;
+  background-size: 100% 100%, 28px 28px, 28px 28px, 100% 100%;
+  transition: opacity 0.42s cubic-bezier(0.22, 1, 0.36, 1), transform 0.42s cubic-bezier(0.22, 1, 0.36, 1);
+  cursor: pointer;
+}
+#splashScreen.hide {
+  opacity: 0;
+  transform: scale(1.025);
+  pointer-events: none;
+}
+.splash-chip {
+  width: 78px;
+  height: 78px;
+  margin-bottom: 18px;
+  filter: drop-shadow(0 0 22px rgba(62, 207, 142, 0.32));
+  animation: splashPop 0.55s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+.splash-die {
+  stroke-dasharray: 220;
+  stroke-dashoffset: 220;
+  animation: splashDraw 0.65s cubic-bezier(0.22, 1, 0.36, 1) 0.1s forwards;
+}
+.splash-pins {
+  opacity: 0;
+  animation: splashFade 0.35s ease 0.35s forwards;
+}
+.splash-chev {
+  stroke-dasharray: 48;
+  stroke-dashoffset: 48;
+  animation: splashDraw 0.4s ease 0.4s forwards;
+}
+.splash-cursor {
+  opacity: 0;
+  animation: splashBlink 0.7s steps(2, start) 0.55s infinite;
+}
+.splash-title {
+  font-size: 20px;
+  font-weight: 700;
+  letter-spacing: 0.28em;
+  color: #EDEDED;
+  margin-bottom: 6px;
+  opacity: 0;
+  animation: splashRise 0.45s cubic-bezier(0.16, 1, 0.3, 1) 0.22s forwards;
+}
+.splash-title span {
+  color: #3ECF8E;
+}
+.splash-sub {
+  font-size: 10.5px;
+  letter-spacing: 0.16em;
+  color: #888888;
+  text-transform: uppercase;
+  margin-bottom: 22px;
+  opacity: 0;
+  animation: splashRise 0.45s cubic-bezier(0.16, 1, 0.3, 1) 0.32s forwards;
+}
+.splash-bar {
+  width: 220px;
+  height: 4px;
+  background: #161816;
+  border: 1px solid #262A27;
+  overflow: hidden;
+  margin-bottom: 14px;
+  opacity: 0;
+  animation: splashFade 0.3s ease 0.35s forwards;
+}
+.splash-bar-fill {
+  height: 100%;
+  width: 0%;
+  background: #3ECF8E;
+  box-shadow: 0 0 12px rgba(62, 207, 142, 0.7);
+  animation: splashLoad 1.15s cubic-bezier(0.22, 1, 0.36, 1) 0.3s forwards;
+}
+.splash-log {
+  font-size: 10px;
+  color: #3ECF8E;
+  letter-spacing: 0.08em;
+  height: 16px;
+  opacity: 0;
+  animation: splashFade 0.3s ease 0.42s forwards;
+}
+@keyframes splashPop {
+  from { opacity: 0; transform: scale(0.84) translateY(8px); }
+  to   { opacity: 1; transform: scale(1) translateY(0); }
+}
+@keyframes splashDraw {
+  to { stroke-dashoffset: 0; }
+}
+@keyframes splashFade {
+  to { opacity: 1; }
+}
+@keyframes splashRise {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes splashBlink {
+  0%, 49% { opacity: 1; }
+  50%, 100% { opacity: 0.15; }
+}
+@keyframes splashLoad {
+  0%   { width: 0%; }
+  45%  { width: 62%; }
+  80%  { width: 88%; }
+  100% { width: 100%; }
+}
+</style>
+</head>
+<body>
+
+<!-- ANIMATED SPLASH SCREEN -->
+<div id="splashScreen" onclick="dismissSplash()" title="Click to enter">
+  <svg class="splash-chip" viewBox="0 0 80 80" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <g class="splash-pins" fill="#3ECF8E">
+      <rect x="24" y="6" width="3.5" height="8"/><rect x="33.5" y="6" width="3.5" height="8"/><rect x="43" y="6" width="3.5" height="8"/><rect x="52.5" y="6" width="3.5" height="8"/>
+      <rect x="24" y="66" width="3.5" height="8"/><rect x="33.5" y="66" width="3.5" height="8"/><rect x="43" y="66" width="3.5" height="8"/><rect x="52.5" y="66" width="3.5" height="8"/>
+      <rect x="6" y="24" width="8" height="3.5"/><rect x="6" y="33.5" width="8" height="3.5"/><rect x="6" y="43" width="8" height="3.5"/><rect x="6" y="52.5" width="8" height="3.5"/>
+      <rect x="66" y="24" width="8" height="3.5"/><rect x="66" y="33.5" width="8" height="3.5"/><rect x="66" y="43" width="8" height="3.5"/><rect x="66" y="52.5" width="8" height="3.5"/>
+    </g>
+    <rect class="splash-die" x="15" y="15" width="50" height="50" rx="7" fill="#0F1411" stroke="#3ECF8E" stroke-width="2.6"/>
+    <path class="splash-chev" d="M27 32L36 40L27 48" stroke="#3ECF8E" stroke-width="3.6" stroke-linecap="square" stroke-linejoin="miter"/>
+    <rect class="splash-cursor" x="41" y="45" width="12" height="3.6" fill="#EDEDED"/>
+  </svg>
+  <div class="splash-title">FREE<span>GPU</span></div>
+  <div class="splash-sub">COLAB GPU TERMINAL // OPENCODE</div>
+  <div class="splash-bar"><div class="splash-bar-fill"></div></div>
+  <div class="splash-log" id="splashLog">▸ INITIALIZING GATEWAY 127.0.0.1:11435</div>
+</div>
+
+<div class="app-shell">
+  <!-- TOP BAR -->
+  <header class="topbar">
+    <div class="topbar-left">
+      <svg class="brand-icon" viewBox="0 0 80 80" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+        <rect x="4" y="4" width="72" height="72" rx="16" fill="#0F1411" stroke="#3ECF8E" stroke-width="3.5"/>
+        <g fill="#3ECF8E">
+          <rect x="27" y="12" width="4" height="6"/><rect x="38" y="12" width="4" height="6"/><rect x="49" y="12" width="4" height="6"/>
+          <rect x="27" y="62" width="4" height="6"/><rect x="38" y="62" width="4" height="6"/><rect x="49" y="62" width="4" height="6"/>
+          <rect x="12" y="27" width="6" height="4"/><rect x="12" y="38" width="6" height="4"/><rect x="12" y="49" width="6" height="4"/>
+          <rect x="62" y="27" width="6" height="4"/><rect x="62" y="38" width="6" height="4"/><rect x="62" y="49" width="6" height="4"/>
+        </g>
+        <rect x="19" y="19" width="42" height="42" rx="6" fill="#0A0A0A" stroke="#3ECF8E" stroke-width="3"/>
+        <path d="M29 33L37 40L29 47" stroke="#3ECF8E" stroke-width="4" stroke-linecap="square"/>
+        <rect x="41" y="44" width="11" height="4" fill="#EDEDED"/>
+      </svg>
+      <span class="brand-hl">FREEGPU</span>
+      <span style="color:var(--dim);font-size:11px;">COLAB GPU TERMINAL</span>
+    </div>
+    <div class="sys6-lines"></div>
+    <div class="topbar-right">
+      <div id="statusBadge" class="status-badge">
+        <span id="statusDot" class="dot"></span>
+        <span id="statusText">STANDBY</span>
+      </div>
+      <button class="btn btn-xs" onclick="toggleTheme()" id="themeBtn">SYS-6</button>
+    </div>
+  </header>
+
+  <!-- WORKSPACE: LEFT STATS SIDEBAR + RIGHT INTERACTIVE CLI -->
+  <div class="workspace">
+    <!-- LEFT SIDEBAR -->
+    <aside class="sidebar">
+      <!-- 1. GPU & Model Selection -->
+      <div class="block">
+        <div class="block-label">
+          <span>01 // GPU &amp; MODEL</span>
+          <button class="btn btn-xs" id="authBtn" onclick="authColab()" style="display:none;border-color:var(--green);color:var(--green);">SIGN IN</button>
+        </div>
+
+        <label class="field-label">Colab Accelerator</label>
+        <select id="gpuSelect" onchange="saveSelection()">
+          <option value="A100">NVIDIA A100 (80 GB VRAM)</option>
+          <option value="L4">NVIDIA L4 (24 GB VRAM)</option>
+          <option value="G4">NVIDIA G4 (24 GB VRAM)</option>
+          <option value="T4">Tesla T4 (16 GB VRAM)</option>
+        </select>
+
+        <label class="field-label">Model (llama.cpp GGUF)</label>
+        <select id="modelSelect" onchange="saveSelection()"></select>
+
+        <button id="powerBtn" class="btn btn-primary" onclick="toggleGPU()">▶ START GPU</button>
+      </div>
+
+      <!-- 2. Live Hardware Telemetry -->
+      <div class="block">
+        <div class="block-label">
+          <span>02 // TELEMETRY</span>
+          <span id="gpuNameTag" style="color:var(--green)">OFFLINE</span>
+        </div>
+
+        <div class="meter">
+          <div class="meter-head">
+            <span>VRAM</span>
+            <span class="meter-val" id="vramText">0.0 / 0.0 GB</span>
+          </div>
+          <div class="bar-track"><div class="bar-fill" id="vramBar"></div></div>
+        </div>
+
+        <div class="meter">
+          <div class="meter-head">
+            <span>GPU COMPUTE</span>
+            <span class="meter-val" id="utilText">0% • 0°C</span>
+          </div>
+          <div class="bar-track"><div class="bar-fill" id="utilBar"></div></div>
+        </div>
+
+        <div class="stat-grid">
+          <div class="stat-box">
+            <div class="n" id="tpsVal">0.0</div>
+            <div class="l">TOKENS / SEC</div>
+          </div>
+          <div class="stat-box">
+            <div class="n" id="uptimeVal">0m</div>
+            <div class="l">UPTIME</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 3. Colab AI Pro Compute Units & Remaining Hours -->
+      <div class="block">
+        <div class="block-label">
+          <span>03 // COLAB QUOTA</span>
+          <span id="cuSyncTag" style="color:var(--green)">SYNCING...</span>
+        </div>
+
+        <div class="meter">
+          <div class="meter-head">
+            <span>COMPUTE UNITS</span>
+            <span class="meter-val"><span id="cuRem">100.0</span> / <span id="cuTot">100</span> CU</span>
+          </div>
+          <div class="bar-track"><div class="bar-fill" id="cuBar" style="width:100%"></div></div>
+        </div>
+
+        <div class="hours-row">
+          <div class="hr-cell">
+            <div class="g">A100</div>
+            <div class="v" id="hrA100">8.5h</div>
+          </div>
+          <div class="hr-cell">
+            <div class="g">L4</div>
+            <div class="v" id="hrL4">20.7h</div>
+          </div>
+          <div class="hr-cell">
+            <div class="g">T4</div>
+            <div class="v" id="hrT4">51.0h</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- 4. Compact Status Log -->
+      <div class="block-label" style="padding: 10px 16px 0;">
+        <span>04 // STATUS</span>
+        <span style="color:var(--dim)">127.0.0.1:11435</span>
+      </div>
+      <div class="log-feed" id="logFeed">▸ Ready. Click [START GPU] to allocate Colab GPU and run OpenCode on the right.</div>
+    </aside>
+
+    <!-- RIGHT TERMINAL PANE -->
+    <main class="terminal-pane">
+      <div class="term-toolbar">
+        <span class="term-title" id="termTitle">~/ — interactive shell (opencode ready)</span>
+        <div class="focus-stats" id="focusStats">
+          <span class="fstat hi"><b id="fsGpu">OFFLINE</b></span>
+          <span class="fsep">|</span>
+          <span class="fstat">VRAM <b id="fsVram">0/0G</b></span>
+          <span class="fsep">|</span>
+          <span class="fstat hi"><b id="fsTps">0.0</b> tok/s</span>
+          <span class="fsep">|</span>
+          <span class="fstat"><b id="fsUtil">0%</b></span>
+          <span class="fsep">|</span>
+          <span class="fstat"><b id="fsCu">100</b> CU</span>
+          <button class="btn btn-xs" id="fsPowerBtn" onclick="toggleGPU()">▶ START</button>
+        </div>
+        <div class="term-actions">
+          <button class="btn btn-xs" style="border-color:var(--green);color:var(--green);" onclick="sendTermCmd('opencode')">▶ RUN OPENCODE</button>
+          <button class="btn btn-xs" onclick="sendTermCmd('clear')">CLEAR</button>
+          <button class="btn btn-xs" onclick="reconnectTerminal()">NEW SHELL</button>
+          <button class="btn btn-xs" id="focusBtn" onclick="toggleFocusMode()" title="Toggle Full-Window Terminal (Cmd+Shift+F)">⤢ FOCUS</button>
+        </div>
+      </div>
+      <div id="terminalContainer"></div>
+    </main>
+  </div>
+</div>
+
+<script>
+let appState = null;
+let gpuRunning = false;
+let gpuBusy = false;
+let term = null;
+let fitAddon = null;
+let ptySocket = null;
+
+function toggleTheme() {
+  document.body.classList.toggle('sys6');
+  const isSys6 = document.body.classList.contains('sys6');
+  document.getElementById('themeBtn').innerText = isSys6 ? 'PIXEL-MONO' : 'SYS-6';
+}
+
+function toggleFocusMode(force) {
+  const active = typeof force === 'boolean'
+    ? document.body.classList.toggle('focus-mode', force)
+    : document.body.classList.toggle('focus-mode');
+  document.getElementById('focusBtn').innerText = active ? '⤡ SIDEBAR' : '⤢ FOCUS';
+  try { localStorage.setItem('freegpu_focus', active ? '1' : '0'); } catch (e) {}
+  requestAnimationFrame(() => {
+    if (fitAddon) {
+      fitAddon.fit();
+      sendResize();
+    }
+    if (term) term.focus();
+  });
+}
+
+window.addEventListener('keydown', (e) => {
+  if ((e.metaKey || e.ctrlKey) && e.shiftKey && (e.key === 'f' || e.key === 'F')) {
+    e.preventDefault();
+    toggleFocusMode();
+  }
+});
+
+function initTerminal() {
+  const container = document.getElementById('terminalContainer');
+  container.innerHTML = '';
+
+  term = new Terminal({
+    cursorBlink: true,
+    fontFamily: '"SF Mono", Menlo, Consolas, "Courier New", monospace',
+    fontSize: 13,
+    lineHeight: 1.25,
+    theme: {
+      background: '#0A0A0A',
+      foreground: '#EDEDED',
+      cursor: '#3ECF8E',
+      selectionBackground: 'rgba(62, 207, 142, 0.25)',
+      green: '#3ECF8E',
+      brightGreen: '#3ECF8E'
+    }
+  });
+
+  fitAddon = new FitAddon.FitAddon();
+  term.loadAddon(fitAddon);
+  term.open(container);
+  fitAddon.fit();
+
+  connectPTY();
+
+  term.onData(data => {
+    if (ptySocket && ptySocket.readyState === WebSocket.OPEN) {
+      ptySocket.send('0' + data);
+    }
+  });
+
+  window.addEventListener('resize', () => {
+    if (fitAddon) {
+      fitAddon.fit();
+      sendResize();
+    }
+  });
+}
+
+function connectPTY() {
+  if (ptySocket) {
+    try { ptySocket.close(); } catch (e) {}
+  }
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ptySocket = new WebSocket(`${proto}//${location.host}/api/pty`);
+  ptySocket.binaryType = 'arraybuffer';
+
+  ptySocket.onopen = () => {
+    fitAddon.fit();
+    sendResize();
+  };
+
+  ptySocket.onmessage = async (ev) => {
+    if (ev.data instanceof ArrayBuffer) {
+      term.write(new Uint8Array(ev.data));
+    } else if (typeof ev.data === 'string') {
+      term.write(ev.data);
+    } else if (ev.data instanceof Blob) {
+      const buf = await ev.data.arrayBuffer();
+      term.write(new Uint8Array(buf));
+    }
+  };
+
+  ptySocket.onclose = () => {
+    term.write('\r\n\x1b[33m[Shell exited. Click NEW SHELL to respawn.]\x1b[0m\r\n');
+  };
+}
+
+function sendResize() {
+  if (ptySocket && ptySocket.readyState === WebSocket.OPEN && term) {
+    ptySocket.send('1' + JSON.stringify({ cols: term.cols, rows: term.rows }));
+  }
+}
+
+function sendTermCmd(cmd) {
+  if (ptySocket && ptySocket.readyState === WebSocket.OPEN) {
+    ptySocket.send('0' + cmd + '\r');
+    term.focus();
+  }
+}
+
+function reconnectTerminal() {
+  initTerminal();
+}
+
+async function fetchState() {
+  try {
+    const res = await fetch('/api/state');
+    const data = await res.json();
+    appState = data;
+    renderState(data);
+  } catch (e) {}
+}
+
+function renderState(data) {
+  const modelSel = document.getElementById('modelSelect');
+  if (modelSel.options.length === 0 && data.presets) {
+    data.presets.forEach(p => {
+      const opt = document.createElement('option');
+      opt.value = p.id;
+      opt.text = `${p.name} (${p.size_gb}GB)`;
+      modelSel.appendChild(opt);
+    });
+    modelSel.value = data.active_model_preset || data.active_model_id;
+    document.getElementById('gpuSelect').value = data.preferred_gpu || 'A100';
+  }
+
+  // Quota
+  const q = data.quota;
+  const cq = data.computed_quota;
+  document.getElementById('cuRem').innerText = q.colab_remaining_cu.toFixed(1);
+  document.getElementById('cuTot').innerText = q.colab_total_cu.toFixed(0);
+  const cuSyncTag = document.getElementById('cuSyncTag');
+  if (q.synced_from_colab) {
+    cuSyncTag.innerText = q.live_burn_rate_hourly > 0 ? `${q.live_burn_rate_hourly.toFixed(1)} CU/HR` : 'LIVE API';
+  }
+  const cuPct = Math.min(100, Math.max(0, (q.colab_remaining_cu / Math.max(1, q.colab_total_cu)) * 100));
+  document.getElementById('cuBar').style.width = `${cuPct}%`;
+  document.getElementById('hrA100').innerText = `${cq.colab_hours_a100}h`;
+  document.getElementById('hrL4').innerText = `${cq.colab_hours_l4}h`;
+  document.getElementById('hrT4').innerText = `${cq.colab_hours_t4}h`;
+
+  document.getElementById('tpsVal').innerText = (data.metrics.last_tokens_per_sec || 0).toFixed(1);
+  document.getElementById('fsTps').innerText = (data.metrics.last_tokens_per_sec || 0).toFixed(1);
+  document.getElementById('fsCu').innerText = q.colab_remaining_cu.toFixed(1);
+
+  const badge = document.getElementById('statusBadge');
+  const dot = document.getElementById('statusDot');
+  const stText = document.getElementById('statusText');
+  const powerBtn = document.getElementById('powerBtn');
+  const fsPowerBtn = document.getElementById('fsPowerBtn');
+  const w = data.active_worker;
+
+  if (w && data.worker_online) {
+    gpuRunning = true;
+    if (!gpuBusy) {
+      powerBtn.className = 'btn btn-stop';
+      powerBtn.innerText = '■ STOP GPU';
+      fsPowerBtn.className = 'btn btn-xs btn-stop-mini';
+      fsPowerBtn.innerText = '■ STOP';
+    }
+    const mins = Math.floor((w.uptime_seconds || 0) / 60);
+    document.getElementById('uptimeVal').innerText = mins >= 60 ? `${(mins/60).toFixed(1)}h` : `${mins}m`;
+
+    if (w.gpus && w.gpus.length > 0) {
+      const g = w.gpus[0];
+      document.getElementById('gpuNameTag').innerText = g.name;
+      const shortGpu = g.name.replace('NVIDIA ', '').replace('-SXM4-80GB', ' 80G').replace('Tesla ', '');
+      document.getElementById('fsGpu').innerText = shortGpu;
+      const uGB = (g.vram_used_mb / 1024).toFixed(1);
+      const tGB = (g.vram_total_mb / 1024).toFixed(1);
+      const vPct = g.vram_total_mb > 0 ? Math.min(100, (g.vram_used_mb / g.vram_total_mb) * 100) : 0;
+      document.getElementById('vramText').innerText = `${uGB} / ${tGB} GB`;
+      document.getElementById('fsVram').innerText = `${uGB}/${tGB}G`;
+      document.getElementById('vramBar').style.width = `${vPct}%`;
+      document.getElementById('utilText').innerText = `${g.util_percent.toFixed(0)}% • ${g.temp_c.toFixed(0)}°C`;
+      document.getElementById('fsUtil').innerText = `${g.util_percent.toFixed(0)}% ${g.temp_c.toFixed(0)}°C`;
+      document.getElementById('utilBar').style.width = `${Math.min(100, g.util_percent)}%`;
+    }
+
+    if (w.status === 'ready' && w.llama_healthy) {
+      badge.className = 'status-badge ready';
+      dot.className = 'dot ready';
+      stText.innerText = `LIVE // ${w.active_model}`;
+    } else {
+      badge.className = 'status-badge booting';
+      dot.className = 'dot booting';
+      stText.innerText = (w.status_detail || w.status || 'BOOTING').toUpperCase();
+    }
+
+    if (w.recent_logs && w.recent_logs.length > 0) {
+      const feed = document.getElementById('logFeed');
+      feed.innerText = w.recent_logs.slice(-8).join('\n');
+      feed.scrollTop = feed.scrollHeight;
+    }
+  } else {
+    gpuRunning = false;
+    if (!gpuBusy) {
+      powerBtn.className = 'btn btn-primary';
+      powerBtn.innerText = '▶ START GPU';
+      fsPowerBtn.className = 'btn btn-xs';
+      fsPowerBtn.innerText = '▶ START';
+    }
+    badge.className = 'status-badge';
+    dot.className = 'dot';
+    stText.innerText = 'STANDBY';
+    document.getElementById('gpuNameTag').innerText = 'OFFLINE';
+    document.getElementById('fsGpu').innerText = 'OFFLINE';
+    document.getElementById('vramText').innerText = '0.0 / 0.0 GB';
+    document.getElementById('fsVram').innerText = '0/0G';
+    document.getElementById('vramBar').style.width = '0%';
+    document.getElementById('utilText').innerText = '0% • 0°C';
+    document.getElementById('fsUtil').innerText = '0%';
+    document.getElementById('utilBar').style.width = '0%';
+    document.getElementById('uptimeVal').innerText = '0m';
+  }
+}
+
+async function saveSelection() {
+  const gpu = document.getElementById('gpuSelect').value;
+  const preset = document.getElementById('modelSelect').value;
+  await fetch('/api/model', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ preferred_gpu: gpu, preset })
+  });
+  fetchState();
+}
+
+async function toggleGPU() {
+  if (gpuBusy) return;
+  const powerBtn = document.getElementById('powerBtn');
+  const feed = document.getElementById('logFeed');
+
+  if (gpuRunning) {
+    gpuBusy = true;
+    powerBtn.innerText = 'STOPPING...';
+    feed.innerText = '▸ Terminating Colab GPU runtime to save Compute Units...';
+    await fetch('/api/colab/down', { method: 'POST', body: '{}' });
+    gpuBusy = false;
+    fetchState();
+  } else {
+    gpuBusy = true;
+    const gpu = document.getElementById('gpuSelect').value;
+    const preset = document.getElementById('modelSelect').value;
+    powerBtn.innerText = `ALLOCATING ${gpu}...`;
+    feed.innerText = `▸ Requesting Colab ${gpu} GPU via colaboratory.googleapis.com...\n▸ Model: ${preset}`;
+    const res = await fetch('/api/colab/up', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ accelerator: gpu, preset })
+    });
+    const out = await res.json();
+    gpuBusy = false;
+    if (!out.ok) {
+      feed.innerText = `⚠️ ${out.error}`;
+      document.getElementById('authBtn').style.display = 'inline-flex';
+    }
+    fetchState();
+  }
+}
+
+async function checkAuthStatus() {
+  try {
+    const res = await fetch('/auth/status');
+    const st = await res.json();
+    const btn = document.getElementById('authBtn');
+    if (!st.signed_in) {
+      btn.style.display = 'inline-flex';
+    } else {
+      btn.style.display = 'none';
+    }
+  } catch (e) {}
+}
+
+async function authColab() {
+  const feed = document.getElementById('logFeed');
+  feed.innerText = '▸ Opening Google Sign-In in your browser...';
+  const res = await fetch('/api/colab/login', { method: 'POST' });
+  const out = await res.json();
+  if (!out.ok) {
+    feed.innerText = `⚠️ ${out.error}`;
+  } else {
+    feed.innerText = '▸ Complete Google sign-in in your browser, then click [▶ START GPU].';
+  }
+}
+
+async function editQuota() {
+  if (!appState) return;
+  const rem = prompt('Remaining Colab Compute Units (CU):', appState.quota.colab_remaining_cu);
+  if (rem === null) return;
+  const tot = prompt('Monthly Total Compute Units (100 or 500):', appState.quota.colab_total_cu);
+  if (tot === null) return;
+  await fetch('/api/quota', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      colab_remaining_cu: parseFloat(rem),
+      colab_total_cu: parseFloat(tot)
+    })
+  });
+  fetchState();
+}
+
+let splashDismissed = false;
+function dismissSplash() {
+  if (splashDismissed) return;
+  splashDismissed = true;
+  const el = document.getElementById('splashScreen');
+  if (el) {
+    el.classList.add('hide');
+    setTimeout(() => { el.remove(); }, 460);
+  }
+  requestAnimationFrame(() => {
+    if (fitAddon) {
+      fitAddon.fit();
+      sendResize();
+    }
+    if (term) term.focus();
+  });
+}
+
+window.addEventListener('DOMContentLoaded', () => {
+  initTerminal();
+  try {
+    if (localStorage.getItem('freegpu_focus') === '1') {
+      toggleFocusMode(true);
+    }
+  } catch (e) {}
+  fetchState();
+  checkAuthStatus();
+  setInterval(fetchState, 2500);
+
+  const splashLog = document.getElementById('splashLog');
+  setTimeout(() => { if (splashLog) splashLog.innerText = '▸ COLAB API DIRECT // ZERO TUNNELS'; }, 520);
+  setTimeout(() => { if (splashLog) splashLog.innerText = '▸ OPENCODE TERMINAL READY'; }, 1050);
+  setTimeout(dismissSplash, 1550);
+});
+</script>
+</body>
+</html>
