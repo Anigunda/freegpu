@@ -1,11 +1,17 @@
 package server
 
 import (
+	"crypto/rand"
+	"crypto/subtle"
 	_ "embed"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/anilgoudgunda/freegpu/internal/auth"
@@ -18,12 +24,45 @@ import (
 //go:embed ui/index.html
 var dashboardHTML []byte
 
+const sessionCookieName = "freegpu_session"
+
 type Server struct {
-	cfg *config.AppConfig
+	cfg          *config.AppConfig
+	sessionToken string
+
+	stopMu        sync.RWMutex
+	stoppingUntil time.Time
+}
+
+func generateSessionToken() string {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return fmt.Sprintf("%d", time.Now().UnixNano())
+	}
+	return hex.EncodeToString(b)
+}
+
+func SessionTokenFile() string {
+	return filepath.Join(config.ConfigDir(), ".session")
 }
 
 func New(cfg *config.AppConfig) *Server {
-	s := &Server{cfg: cfg}
+	tok := generateSessionToken()
+	_ = os.MkdirAll(config.ConfigDir(), 0700)
+	_ = os.WriteFile(SessionTokenFile(), []byte(tok), 0600)
+
+	s := &Server{
+		cfg:          cfg,
+		sessionToken: tok,
+	}
+
+	// Don't display stale tokens/sec from a prior session before a live model responds
+	s.cfg.Lock()
+	if s.cfg.ActiveWorker == nil || time.Since(s.cfg.ActiveWorker.LastSeen) > 45*time.Second {
+		s.cfg.Metrics.LastTokensPerSec = 0
+		s.cfg.Metrics.LastLatencyMs = 0
+	}
+	s.cfg.Unlock()
 
 	// Ensure OpenCode is always auto-configured on startup
 	modelID, _, _, _ := cfg.GetActiveModelSpec()
@@ -33,32 +72,86 @@ func New(cfg *config.AppConfig) *Server {
 	return s
 }
 
+func (s *Server) SessionToken() string {
+	return s.sessionToken
+}
+
+func (s *Server) isAllowedOrigin(origin string) bool {
+	if origin == "" {
+		return false
+	}
+	allowed1 := fmt.Sprintf("http://127.0.0.1:%d", s.cfg.Port)
+	allowed2 := fmt.Sprintf("http://localhost:%d", s.cfg.Port)
+	return origin == allowed1 || origin == allowed2
+}
+
+func (s *Server) hasValidToken(r *http.Request) bool {
+	if hdr := strings.TrimSpace(r.Header.Get("X-FreeGPU-Token")); hdr != "" {
+		if subtle.ConstantTimeCompare([]byte(hdr), []byte(s.sessionToken)) == 1 {
+			return true
+		}
+	}
+	if c, err := r.Cookie(sessionCookieName); err == nil && c.Value != "" {
+		if subtle.ConstantTimeCompare([]byte(c.Value), []byte(s.sessionToken)) == 1 {
+			return true
+		}
+	}
+	return false
+}
+
+// requireControlAuth protects local control-plane & WebSocket PTY endpoints against cross-origin browser attacks (CSRF / CSWSH).
+func (s *Server) requireControlAuth(requireOrigin bool, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("Cache-Control", "no-store")
+		origin := r.Header.Get("Origin")
+		if requireOrigin {
+			if !s.isAllowedOrigin(origin) {
+				http.Error(w, "forbidden origin", http.StatusForbidden)
+				return
+			}
+		} else if origin != "" && !s.isAllowedOrigin(origin) {
+			http.Error(w, "forbidden origin", http.StatusForbidden)
+			return
+		}
+		if !s.hasValidToken(r) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if r.Method == http.MethodPost {
+			r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB cap for control-plane JSON payloads
+		}
+		next(w, r)
+	}
+}
+
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
-	// OpenAI-compatible API for OpenCode
+	// OpenAI-compatible API for OpenCode (local non-browser client; no wildcard CORS)
 	mux.HandleFunc("/v1/", s.handleOpenAIProxy)
 	mux.HandleFunc("/v1/models", s.handleOpenAIModels)
 
-	// Embedded PTY WebSocket for interactive CLI / OpenCode terminal
-	mux.HandleFunc("/api/pty", pty.HandleWebSocket)
+	// Embedded PTY WebSocket: strictly requires localhost Origin + authenticated session cookie/token
+	mux.HandleFunc("/api/pty", s.requireControlAuth(true, pty.HandleWebSocket))
 
-	// Native Google OAuth2 PKCE endpoints (zero gcloud CLI required)
-	mux.HandleFunc("/auth/login", s.handleAuthLogin)
+	// Native Google OAuth2 PKCE endpoints (/auth/callback verifies cryptographic OAuth state itself)
+	mux.HandleFunc("/auth/login", s.requireControlAuth(false, s.handleAuthLogin))
 	mux.HandleFunc("/auth/callback", auth.HandleCallback)
-	mux.HandleFunc("/auth/status", s.handleAuthStatus)
-	mux.HandleFunc("/auth/logout", s.handleAuthLogout)
+	mux.HandleFunc("/auth/status", s.requireControlAuth(false, s.handleAuthStatus))
+	mux.HandleFunc("/auth/logout", s.requireControlAuth(false, s.handleAuthLogout))
 
-	// Control Plane REST API
-	mux.HandleFunc("/api/state", s.handleGetState)
-	mux.HandleFunc("/api/model", s.handleUpdateModel)
-	mux.HandleFunc("/api/quota", s.handleUpdateQuota)
-	mux.HandleFunc("/api/colab/status", s.handleColabAPIStatus)
-	mux.HandleFunc("/api/colab/login", s.handleColabAPILogin)
-	mux.HandleFunc("/api/colab/up", s.handleColabAPIUp)
-	mux.HandleFunc("/api/colab/down", s.handleColabAPIDown)
+	// Control Plane REST API: protected by Origin check + session cookie/token
+	mux.HandleFunc("/api/state", s.requireControlAuth(false, s.handleGetState))
+	mux.HandleFunc("/api/model", s.requireControlAuth(false, s.handleUpdateModel))
+	mux.HandleFunc("/api/quota", s.requireControlAuth(false, s.handleUpdateQuota))
+	mux.HandleFunc("/api/colab/status", s.requireControlAuth(false, s.handleColabAPIStatus))
+	mux.HandleFunc("/api/colab/login", s.requireControlAuth(false, s.handleColabAPILogin))
+	mux.HandleFunc("/api/colab/up", s.requireControlAuth(false, s.handleColabAPIUp))
+	mux.HandleFunc("/api/colab/down", s.requireControlAuth(false, s.handleColabAPIDown))
 
-	// Embedded Desktop App UI
+	// Embedded Desktop App UI (bootstraps HttpOnly SameSite=Strict session cookie from ?token=)
 	mux.HandleFunc("/", s.handleDashboardUI)
 
 	return mux
@@ -79,13 +172,33 @@ func (s *Server) handleDashboardUI(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	// Bootstrap HttpOnly SameSite=Strict session cookie from launch URL ?token=...
+	if qTok := r.URL.Query().Get("token"); qTok != "" {
+		if subtle.ConstantTimeCompare([]byte(qTok), []byte(s.sessionToken)) == 1 {
+			http.SetCookie(w, &http.Cookie{
+				Name:     sessionCookieName,
+				Value:    s.sessionToken,
+				Path:     "/",
+				HttpOnly: true,
+				SameSite: http.SameSiteStrictMode,
+			})
+			http.Redirect(w, r, "/", http.StatusFound)
+			return
+		}
+		http.Error(w, "invalid session token", http.StatusForbidden)
+		return
+	}
+	if !s.hasValidToken(r) {
+		http.Error(w, "FreeGPU session required — open FreeGPU.app or use the tokenized URL printed by freegpu serve.", http.StatusUnauthorized)
+		return
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("X-Frame-Options", "DENY")
 	_, _ = w.Write(dashboardHTML)
 }
 
 func (s *Server) handleGetState(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
 
 	modelID, hfRepo, hfFile, ctxSize := s.cfg.GetActiveModelSpec()
 
@@ -234,12 +347,20 @@ func (s *Server) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAuthLogout(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
 	_ = auth.Logout()
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"ok": true})
 }
 
 func (s *Server) handleColabAPILogin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST required", http.StatusMethodNotAllowed)
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	if err := provider.TriggerColabOAuthLogin(s.cfg.Port); err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -276,6 +397,15 @@ func (s *Server) handleColabAPIUp(w http.ResponseWriter, r *http.Request) {
 
 	modelID, _, _, _ := s.cfg.GetActiveModelSpec()
 	_, _ = provider.InjectOpenCodeConfig(s.cfg.Port, modelID, true)
+
+	// Clear any prior stop cooldown and reset live speed metrics for the fresh GPU session
+	s.stopMu.Lock()
+	s.stoppingUntil = time.Time{}
+	s.stopMu.Unlock()
+	s.cfg.Lock()
+	s.cfg.Metrics.LastTokensPerSec = 0
+	s.cfg.Metrics.LastLatencyMs = 0
+	s.cfg.Unlock()
 
 	// Immediately mark worker as booting so UI shows instant feedback
 	s.cfg.UpdateTelemetry(config.WorkerTelemetry{
@@ -320,9 +450,25 @@ func (s *Server) handleColabAPIDown(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "POST required", http.StatusMethodNotAllowed)
 		return
 	}
-	count, err := provider.DeleteColabRuntimes("")
+	// Immediately suppress backgroundSyncLoop re-attachment for 25s while Colab tears down the VM
+	s.stopMu.Lock()
+	s.stoppingUntil = time.Now().Add(25 * time.Second)
+	s.stopMu.Unlock()
+
 	s.cfg.Lock()
 	s.cfg.ActiveWorker = nil
+	s.cfg.Metrics.LastTokensPerSec = 0
+	s.cfg.Metrics.LastLatencyMs = 0
+	s.cfg.Unlock()
+	_ = s.cfg.Save()
+
+	count, err := provider.DeleteColabRuntimes("")
+
+	// Re-clear in case an in-flight telemetry poll raced right before stoppingUntil was set
+	s.cfg.Lock()
+	s.cfg.ActiveWorker = nil
+	s.cfg.Metrics.LastTokensPerSec = 0
+	s.cfg.Metrics.LastLatencyMs = 0
 	s.cfg.Unlock()
 	_ = s.cfg.Save()
 
@@ -374,6 +520,13 @@ func (s *Server) backgroundSyncLoop() {
 		case <-ccuTicker.C:
 			go s.syncLiveColabCCU()
 		case <-ticker.C:
+			s.stopMu.RLock()
+			isStopping := time.Now().Before(s.stoppingUntil)
+			s.stopMu.RUnlock()
+			if isStopping {
+				continue
+			}
+
 			s.cfg.RLock()
 			var rtName, jURL, pTok string
 			if s.cfg.ActiveWorker != nil {
@@ -384,7 +537,13 @@ func (s *Server) backgroundSyncLoop() {
 			s.cfg.RUnlock()
 
 			if t, err := provider.FetchDirectColabTelemetry(rtName, jURL, pTok); err == nil && t.Status != "" {
-				s.cfg.UpdateTelemetry(t)
+				// Re-check stoppingUntil right before writing telemetry so a slow poll never resurrects a stopped GPU
+				s.stopMu.RLock()
+				stillStopping := time.Now().Before(s.stoppingUntil)
+				s.stopMu.RUnlock()
+				if !stillStopping {
+					s.cfg.UpdateTelemetry(t)
+				}
 			}
 		}
 	}

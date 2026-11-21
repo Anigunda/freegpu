@@ -99,18 +99,28 @@ USAGE:
 
 func ensureServerRunning(cfg *config.AppConfig) string {
 	addr := fmt.Sprintf("127.0.0.1:%d", cfg.Port)
-	url := "http://" + addr
+	baseURL := "http://" + addr
 
 	// Check if server is already listening on addr
 	conn, err := net.DialTimeout("tcp", addr, 400*time.Millisecond)
 	if err == nil {
 		_ = conn.Close()
-		return url
+		if tokBytes, err := os.ReadFile(server.SessionTokenFile()); err == nil {
+			if tok := strings.TrimSpace(string(tokBytes)); tok != "" {
+				return baseURL + "/?token=" + tok
+			}
+		}
+		return baseURL
 	}
 
 	srv := server.New(cfg)
+	httpSrv := &http.Server{
+		Addr:              addr,
+		Handler:           srv.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
 	go func() {
-		_ = http.ListenAndServe(addr, srv.Handler())
+		_ = httpSrv.ListenAndServe()
 	}()
 
 	// Wait briefly until listening
@@ -121,7 +131,7 @@ func ensureServerRunning(cfg *config.AppConfig) string {
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
-	return url
+	return baseURL + "/?token=" + srv.SessionToken()
 }
 
 func runDesktopApp() {
@@ -153,8 +163,13 @@ func runServe(args []string) {
 	addr := fmt.Sprintf("127.0.0.1:%d", cfg.Port)
 	modelID, _, _, _ := cfg.GetActiveModelSpec()
 
-	fmt.Printf("⚡ FreeGPU v%s listening on http://%s (OpenCode: http://%s/v1, Model: %s)\n", version, addr, addr, modelID)
-	if err := http.ListenAndServe(addr, srv.Handler()); err != nil {
+	fmt.Printf("⚡ FreeGPU v%s listening on http://%s/?token=%s (OpenCode: http://%s/v1, Model: %s)\n", version, addr, srv.SessionToken(), addr, modelID)
+	httpSrv := &http.Server{
+		Addr:              addr,
+		Handler:           srv.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	if err := httpSrv.ListenAndServe(); err != nil {
 		fmt.Fprintf(os.Stderr, "Server error: %v\n", err)
 		os.Exit(1)
 	}

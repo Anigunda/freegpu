@@ -15,7 +15,6 @@ import (
 
 func (s *Server) handleOpenAIModels(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
 
 	activeID, _, _, _ := s.cfg.GetActiveModelSpec()
 	now := time.Now().Unix()
@@ -59,16 +58,25 @@ func (s *Server) handleOpenAIModels(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleOpenAIProxy(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Headers", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 	if r.Method == http.MethodOptions {
-		w.WriteHeader(http.StatusNoContent)
+		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
 
 	if r.URL.Path == "/v1/models" && r.Method == http.MethodGet {
 		s.handleOpenAIModels(w, r)
+		return
+	}
+
+	// Strictly allowlist OpenAI inference paths so llama-server admin/metrics endpoints cannot be reached
+	switch r.URL.Path {
+	case "/v1/chat/completions", "/v1/completions", "/v1/embeddings":
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST required", http.StatusMethodNotAllowed)
+			return
+		}
+	default:
+		http.Error(w, "unsupported OpenAI endpoint", http.StatusNotFound)
 		return
 	}
 
@@ -109,6 +117,7 @@ func (s *Server) handleOpenAIProxy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	startTime := time.Now()
+	r.Body = http.MaxBytesReader(w, r.Body, 64<<20) // 64 MiB cap (plenty for 128k context prompts)
 	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)

@@ -21,7 +21,6 @@ const pyPTYHelper = `
 import os, sys, pty, select, struct, fcntl, termios, json, signal
 
 shell = os.environ.get("SHELL", "/bin/zsh")
-init_cmd = sys.argv[1] if len(sys.argv) > 1 else ""
 
 pid, master_fd = pty.fork()
 if pid == 0:
@@ -37,9 +36,6 @@ def set_winsize(fd, rows, cols):
         pass
 
 set_winsize(master_fd, 34, 115)
-
-if init_cmd:
-    os.write(master_fd, (init_cmd + "\r").encode("utf-8"))
 
 stdin_fd = sys.stdin.fileno()
 stdout_fd = sys.stdout.fileno()
@@ -119,9 +115,8 @@ func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	initCmd := r.URL.Query().Get("cmd")
 	home, _ := os.UserHomeDir()
-	cmd := exec.Command("python3", "-u", "-c", pyPTYHelper, initCmd)
+	cmd := exec.Command("python3", "-u", "-c", pyPTYHelper)
 	if home != "" {
 		cmd.Dir = home
 	}
@@ -263,6 +258,11 @@ func readWSFrame(r *bufio.Reader) (byte, []byte, error) {
 			return 0, nil, err
 		}
 		length = binary.BigEndian.Uint64(ext[:])
+	}
+
+	const maxWSFrameBytes = 1 << 20 // 1 MiB cap against OOM DoS
+	if length > maxWSFrameBytes {
+		return 0, nil, fmt.Errorf("websocket frame too large: %d bytes", length)
 	}
 
 	var mask [4]byte

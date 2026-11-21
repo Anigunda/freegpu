@@ -400,7 +400,8 @@ func SpinUpColabRuntimeHeadless(accelerator string, bootScript string) (*ColabRu
 				targetRuntime = tryAllocate("L4", "SHAPE_STANDARD", 30)
 			}
 		}
-	} else if targetRuntime.ConnectionInfo.URL == "" {
+	} else {
+		// Always refresh ConnectionInfo on reused runtimes so the 1-hour Colab proxy JWT token is guaranteed fresh
 		fullBytes, fCode, _ := colabRequest("GET", colabAPIBase+"/"+targetRuntime.Name, token, project, nil)
 		if fCode == 200 {
 			var fullRT ColabRuntime
@@ -467,14 +468,20 @@ func executeScriptOnColabJupyter(jupyterURL, proxyToken, oauthToken, bootScript 
 	})
 
 	var termName string
-	deadline := time.Now().Add(35 * time.Second)
+	var lastErr string
+	deadline := time.Now().Add(60 * time.Second)
 	for time.Now().Before(deadline) {
 		req, _ := http.NewRequest("PUT", baseURL+"/api/contents/freegpu_boot.py", bytes.NewReader(putPayload))
 		req.Header.Set("X-Colab-Runtime-Proxy-Token", proxyToken)
 		req.Header.Set("Authorization", "Bearer "+oauthToken)
 		req.Header.Set("Content-Type", "application/json")
 		if resp, err := client.Do(req); err == nil {
+			if resp.StatusCode >= 400 {
+				lastErr = fmt.Sprintf("PUT boot.py HTTP %d", resp.StatusCode)
+			}
 			_ = resp.Body.Close()
+		} else {
+			lastErr = err.Error()
 		}
 
 		tReq, _ := http.NewRequest("POST", baseURL+"/api/terminals", nil)
@@ -482,7 +489,11 @@ func executeScriptOnColabJupyter(jupyterURL, proxyToken, oauthToken, bootScript 
 		tReq.Header.Set("Authorization", "Bearer "+oauthToken)
 		if tResp, err := client.Do(tReq); err == nil {
 			tBytes, _ := io.ReadAll(tResp.Body)
+			code := tResp.StatusCode
 			_ = tResp.Body.Close()
+			if code >= 400 {
+				lastErr = fmt.Sprintf("POST /api/terminals HTTP %d", code)
+			}
 			var term struct {
 				Name string `json:"name"`
 			}
@@ -490,11 +501,16 @@ func executeScriptOnColabJupyter(jupyterURL, proxyToken, oauthToken, bootScript 
 				termName = term.Name
 				break
 			}
+		} else {
+			lastErr = err.Error()
 		}
 		time.Sleep(2 * time.Second)
 	}
 
 	if termName == "" {
+		if lastErr != "" {
+			return fmt.Errorf("timed out waiting for Colab Jupyter server (%s)", lastErr)
+		}
 		return fmt.Errorf("timed out waiting for Colab Jupyter server")
 	}
 

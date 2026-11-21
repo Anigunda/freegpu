@@ -33,6 +33,26 @@ func DefaultPresets() []ModelPreset {
 			RecommendedOn: "A100 (80GB) / L4 (24GB)",
 		},
 		{
+			ID:            "inkling-2-mini-q8",
+			Name:          "Inkling 2 Mini Q8",
+			HFRepo:        "unsloth/Inkling-2-Mini-GGUF",
+			HFFile:        "Inkling-2-Mini-UD-Q8_K_XL.gguf",
+			SizeGB:        21.3,
+			MinVRAMGB:     26,
+			DefaultCtx:    131072,
+			RecommendedOn: "A100 (80GB VRAM)",
+		},
+		{
+			ID:            "inkling-2-mini",
+			Name:          "Inkling 2 Mini Q4-XL",
+			HFRepo:        "unsloth/Inkling-2-Mini-GGUF",
+			HFFile:        "Inkling-2-Mini-UD-Q4_K_XL.gguf",
+			SizeGB:        16.4,
+			MinVRAMGB:     19,
+			DefaultCtx:    131072,
+			RecommendedOn: "L4 (24GB) / A100 (80GB)",
+		},
+		{
 			ID:            "qwen3-coder-next",
 			Name:          "Qwen 3 Coder Next 80B",
 			HFRepo:        "unsloth/Qwen3-Coder-Next-GGUF",
@@ -118,7 +138,7 @@ type GPUDevice struct {
 type WorkerTelemetry struct {
 	RuntimeName   string      `json:"runtime_name"`
 	JupyterURL    string      `json:"jupyter_url"`
-	ProxyToken    string      `json:"proxy_token,omitempty"`
+	ProxyToken    string      `json:"-"` // Never persist Colab JWT proxy token to disk or expose via /api/state
 	Status        string      `json:"status"` // "booting", "downloading", "loading_model", "ready", "error"
 	StatusDetail  string      `json:"status_detail"`
 	ActiveModel   string      `json:"active_model"`
@@ -175,9 +195,10 @@ func ConfigFilePath() string {
 }
 
 func LoadOrCreate() (*AppConfig, error) {
-	if err := os.MkdirAll(ConfigDir(), 0755); err != nil {
+	if err := os.MkdirAll(ConfigDir(), 0700); err != nil {
 		return nil, err
 	}
+	_ = os.Chmod(ConfigDir(), 0700)
 
 	cfg := &AppConfig{
 		Port:              11435,

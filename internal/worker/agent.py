@@ -39,11 +39,13 @@ WORK_DIR = "/tmp/freegpu"
 TELEMETRY_FILE = "/tmp/freegpu_telemetry.json"
 REQ_FILE = "/tmp/freegpu_req.json"
 
+# Unsloth portable CUDA 12 build includes mainline llama.cpp + Inkling-2-Mini looped-transformer & NVFP4 support
+LLAMA_BUILD_TAG = "unsloth-b12588-mix-c0c3de8"
 PREBUILT_LLAMA_CUDA_URL = (
-    "https://github.com/ggml-org/llama.cpp/releases/download/b12531/llama-b12531-bin-ubuntu-cuda-12.8-x64.tar.gz"
+    "https://github.com/unslothai/llama.cpp/releases/download/b12588-mix-c0c3de8/app-b12588-mix-c0c3de8-linux-x64-cuda12-portable.tar.gz"
 )
 PREBUILT_CUDART_URL = (
-    "https://github.com/ggml-org/llama.cpp/releases/download/b12531/cudart-llama-b12531-bin-ubuntu-cuda-12.8-x64.tar.gz"
+    "https://github.com/ggml-org/llama.cpp/releases/download/b12608/cudart-llama-b12608-bin-ubuntu-cuda-12.8-x64.tar.gz"
 )
 
 
@@ -157,9 +159,15 @@ REQ_QUEUE = queue.Queue()
 
 
 def _handle_single_request(req_obj: dict):
-    req_id = req_obj.get("id", "default")
-    method = req_obj.get("method", "POST")
-    path = req_obj.get("path", "/v1/chat/completions")
+    req_id = str(req_obj.get("id", ""))
+    if not req_id or not all(c.isalnum() or c in "_-" for c in req_id) or len(req_id) > 64:
+        return
+    method = str(req_obj.get("method", "POST")).upper()
+    if method not in ("GET", "POST"):
+        return
+    path = str(req_obj.get("path", "/v1/chat/completions"))
+    if not path.startswith("/v1/") or ".." in path:
+        return
     body_str = req_obj.get("body", "")
     resp_file = f"/tmp/freegpu_resp_{req_id}.txt"
 
@@ -266,22 +274,43 @@ def ensure_llama_server() -> str:
     bin_dir = os.path.join(WORK_DIR, "bin")
     os.makedirs(bin_dir, exist_ok=True)
     llama_bin = os.path.join(bin_dir, "llama-server")
+    ver_file = os.path.join(bin_dir, ".version")
 
-    if _test_llama_bin(llama_bin, bin_dir):
-        log("Using cached CUDA llama-server binary")
+    cached_ver = ""
+    if os.path.exists(ver_file):
+        try:
+            cached_ver = open(ver_file).read().strip()
+        except Exception:
+            pass
+
+    if cached_ver == LLAMA_BUILD_TAG and _test_llama_bin(llama_bin, bin_dir):
+        log(f"Using cached CUDA llama-server ({LLAMA_BUILD_TAG})")
         return llama_bin
 
     if platform.system() == "Linux" and platform.machine() in ("x86_64", "amd64"):
         try:
+            shutil.rmtree(bin_dir, ignore_errors=True)
+            os.makedirs(bin_dir, exist_ok=True)
             tar_path = os.path.join(WORK_DIR, "llama-cuda.tar.gz")
-            log("Fetching pre-built CUDA llama-server binary...")
+            log(f"Fetching pre-built CUDA llama-server ({LLAMA_BUILD_TAG})...")
             urllib.request.urlretrieve(PREBUILT_LLAMA_CUDA_URL, tar_path)
-            subprocess.run(["tar", "-xzf", tar_path, "--strip-components=1", "-C", bin_dir], check=True)
+            subprocess.run(["tar", "-xzf", tar_path, "-C", bin_dir], check=True)
             os.remove(tar_path)
+            if not os.path.exists(llama_bin):
+                # Handle archives that wrap binaries in a single top-level directory
+                for root_d, _, files in os.walk(bin_dir):
+                    if "llama-server" in files:
+                        for fn in os.listdir(root_d):
+                            src = os.path.join(root_d, fn)
+                            dst = os.path.join(bin_dir, fn)
+                            if src != dst and not os.path.exists(dst):
+                                shutil.move(src, dst)
+                        break
             os.chmod(llama_bin, 0o755)
 
             if _test_llama_bin(llama_bin, bin_dir):
-                log("CUDA llama-server verified!")
+                open(ver_file, "w").write(LLAMA_BUILD_TAG)
+                log(f"CUDA llama-server ({LLAMA_BUILD_TAG}) verified!")
                 return llama_bin
 
             log("Fetching CUDA 12.8 runtime bundle (libcublas)...")
@@ -294,10 +323,11 @@ def ensure_llama_server() -> str:
                 os.remove(cudart_tar)
 
             if _test_llama_bin(llama_bin, bin_dir):
-                log("CUDA llama-server + runtime bundle ready!")
+                open(ver_file, "w").write(LLAMA_BUILD_TAG)
+                log(f"CUDA llama-server ({LLAMA_BUILD_TAG}) + runtime bundle ready!")
                 return llama_bin
         except Exception as e:
-            log(f"Pre-built binary issue ({e}), compiling native CUDA...")
+            log(f"Pre-built binary issue ({e})")
 
     raise RuntimeError("Failed to prepare CUDA llama-server")
 

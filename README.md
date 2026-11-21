@@ -43,6 +43,8 @@ open FreeGPU.app
 | Preset ID | Model | Size | Default Context | Best GPU Fit |
 | :--- | :--- | :--- | :--- | :--- |
 | `qwen3.6-35b-a3b` *(default)* | Qwen 3.6 35B | 20.6 GB | 128k | A100 (80GB) / L4 (24GB) |
+| `inkling-2-mini-q8` | Inkling 2 Mini Q8 | 21.3 GB | 128k | A100 (80GB) |
+| `inkling-2-mini` | Inkling 2 Mini Q4-XL | 16.4 GB | 128k | L4 (24GB) / A100 (80GB) |
 | `qwen3-coder-next` | Qwen 3 Coder Next 80B | 42.9 GB | 128k | A100 (80GB) |
 | `qwen3-coder-30b-a3b` | Qwen 3 Coder 30B | 17.3 GB | 128k | A100 / L4 (24GB) |
 | `nemotron-3.5-30b-a3b` | Nemotron 3.5 30B | 21.6 GB | 128k | A100 (80GB) / L4 (24GB) |

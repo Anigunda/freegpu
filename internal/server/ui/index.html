@@ -859,8 +859,10 @@ function renderState(data) {
   document.getElementById('hrL4').innerText = `${cq.colab_hours_l4}h`;
   document.getElementById('hrT4').innerText = `${cq.colab_hours_t4}h`;
 
-  document.getElementById('tpsVal').innerText = (data.metrics.last_tokens_per_sec || 0).toFixed(1);
-  document.getElementById('fsTps').innerText = (data.metrics.last_tokens_per_sec || 0).toFixed(1);
+  const isLiveReady = !!(data.active_worker && data.worker_online && data.active_worker.status === 'ready' && data.active_worker.llama_healthy);
+  const liveTps = isLiveReady ? (data.metrics.last_tokens_per_sec || 0) : 0;
+  document.getElementById('tpsVal').innerText = liveTps.toFixed(1);
+  document.getElementById('fsTps').innerText = liveTps.toFixed(1);
   document.getElementById('fsCu').innerText = q.colab_remaining_cu.toFixed(1);
 
   const badge = document.getElementById('statusBadge');
@@ -883,9 +885,19 @@ function renderState(data) {
 
     if (w.gpus && w.gpus.length > 0) {
       const g = w.gpus[0];
-      document.getElementById('gpuNameTag').innerText = g.name;
+      const pref = (data.preferred_gpu || '').toUpperCase();
       const shortGpu = g.name.replace('NVIDIA ', '').replace('-SXM4-80GB', ' 80G').replace('Tesla ', '');
-      document.getElementById('fsGpu').innerText = shortGpu;
+      const fellBack = pref && !g.name.toUpperCase().includes(pref);
+      const gpuTagEl = document.getElementById('gpuNameTag');
+      if (fellBack) {
+        gpuTagEl.innerText = `${pref} FULL → ${shortGpu}`;
+        gpuTagEl.style.color = 'var(--amber)';
+        document.getElementById('fsGpu').innerText = `${pref}→${shortGpu}`;
+      } else {
+        gpuTagEl.innerText = g.name;
+        gpuTagEl.style.color = 'var(--green)';
+        document.getElementById('fsGpu').innerText = shortGpu;
+      }
       const uGB = (g.vram_used_mb / 1024).toFixed(1);
       const tGB = (g.vram_total_mb / 1024).toFixed(1);
       const vPct = g.vram_total_mb > 0 ? Math.min(100, (g.vram_used_mb / g.vram_total_mb) * 100) : 0;
@@ -953,9 +965,22 @@ async function toggleGPU() {
 
   if (gpuRunning) {
     gpuBusy = true;
+    const fsPowerBtn = document.getElementById('fsPowerBtn');
     powerBtn.innerText = 'STOPPING...';
+    if (fsPowerBtn) fsPowerBtn.innerText = 'STOPPING...';
     feed.innerText = '▸ Terminating Colab GPU runtime to save Compute Units...';
-    await fetch('/api/colab/down', { method: 'POST', body: '{}' });
+    try {
+      const res = await fetch('/api/colab/down', { method: 'POST', body: '{}' });
+      const out = await res.json();
+      if (out.ok) {
+        gpuRunning = false;
+        feed.innerText = `▸ ${out.message || 'Colab GPU stopped.'}`;
+      } else {
+        feed.innerText = `⚠️ ${out.error || 'Failed to stop GPU'}`;
+      }
+    } catch (e) {
+      feed.innerText = `⚠️ Stop request failed: ${e}`;
+    }
     gpuBusy = false;
     fetchState();
   } else {

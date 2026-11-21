@@ -10,7 +10,9 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -330,18 +332,56 @@ func fetchUserEmail(accessToken string) string {
 	return info.Email
 }
 
+const (
+	keychainService = "com.anilgoudgunda.freegpu"
+	keychainAccount = "oauth_token"
+)
+
 func saveStoredToken(tok *StoredToken) error {
-	if err := os.MkdirAll(config.ConfigDir(), 0755); err != nil {
-		return err
-	}
-	b, err := json.MarshalIndent(tok, "", "  ")
+	b, err := json.Marshal(tok)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(tokenFilePath(), b, 0600)
+	if runtime.GOOS == "darwin" {
+		// Store securely in macOS Login Keychain (base64 encoded to avoid newline/quoting issues)
+		encoded := base64.StdEncoding.EncodeToString(b)
+		cmd := exec.Command("security", "add-generic-password",
+			"-U",
+			"-s", keychainService,
+			"-a", keychainAccount,
+			"-w", encoded,
+		)
+		if err := cmd.Run(); err == nil {
+			// Remove any legacy plaintext token file once safely in Keychain
+			_ = os.Remove(tokenFilePath())
+			return nil
+		}
+	}
+	if err := os.MkdirAll(config.ConfigDir(), 0700); err != nil {
+		return err
+	}
+	pretty, _ := json.MarshalIndent(tok, "", "  ")
+	return os.WriteFile(tokenFilePath(), pretty, 0600)
 }
 
 func loadStoredToken() (*StoredToken, error) {
+	if runtime.GOOS == "darwin" {
+		out, err := exec.Command("security", "find-generic-password",
+			"-s", keychainService,
+			"-a", keychainAccount,
+			"-w",
+		).Output()
+		if err == nil {
+			raw := strings.TrimSpace(string(out))
+			if decoded, decErr := base64.StdEncoding.DecodeString(raw); decErr == nil {
+				var tok StoredToken
+				if json.Unmarshal(decoded, &tok) == nil {
+					return &tok, nil
+				}
+			}
+		}
+	}
+
 	data, err := os.ReadFile(tokenFilePath())
 	if err != nil {
 		return nil, err
@@ -349,6 +389,10 @@ func loadStoredToken() (*StoredToken, error) {
 	var tok StoredToken
 	if err := json.Unmarshal(data, &tok); err != nil {
 		return nil, err
+	}
+	// Transparently migrate legacy plaintext file into macOS Keychain
+	if runtime.GOOS == "darwin" {
+		_ = saveStoredToken(&tok)
 	}
 	return &tok, nil
 }
@@ -459,7 +503,7 @@ func refreshADCFile() (token, project string, expiry time.Time, err error) {
 	return refreshed.AccessToken, adc.QuotaProjectID, refreshed.Expiry, nil
 }
 
-// Logout clears the stored FreeGPU OAuth token and memory cache.
+// Logout clears the stored FreeGPU OAuth token (Keychain + file) and memory cache.
 func Logout() error {
 	mu.Lock()
 	cachedToken = ""
@@ -468,6 +512,12 @@ func Logout() error {
 	cachedEmail = ""
 	cachedExpiry = time.Time{}
 	mu.Unlock()
+	if runtime.GOOS == "darwin" {
+		_ = exec.Command("security", "delete-generic-password",
+			"-s", keychainService,
+			"-a", keychainAccount,
+		).Run()
+	}
 	if err := os.Remove(tokenFilePath()); err != nil && !os.IsNotExist(err) {
 		return err
 	}
